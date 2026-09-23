@@ -3,18 +3,22 @@
   import { open as openFolder } from "@tauri-apps/plugin-dialog";
   import { api } from "../lib/api";
   import { fmtCount } from "../lib/format";
-  import type { DiskMeta, ScanProgress } from "../lib/types";
+  import type { CatalogGroup, DiskMeta, ScanProgress } from "../lib/types";
 
   let {
+    groups,
     onCreated,
     onCancel,
   }: {
+    groups: CatalogGroup[];
     onCreated: (d: DiskMeta) => void;
     onCancel: () => void;
   } = $props();
 
   let name = $state("");
   let folder = $state("");
+  /** 0 = sin grupo (los `<option>` de un `<select>` no llevan bien `null`). */
+  let groupId = $state(0);
   let busy = $state(false);
   let progress = $state<ScanProgress | null>(null);
   let err = $state("");
@@ -39,7 +43,11 @@
       progress = ev.payload;
     });
     try {
-      const meta = await api.createCatalog(name.trim(), folder);
+      const meta = await api.createCatalog(
+        name.trim(),
+        folder,
+        groupId === 0 ? null : groupId,
+      );
       un();
       onCreated(meta);
     } catch (e) {
@@ -72,6 +80,16 @@
           <input id="catalog-folder" type="text" bind:value={folder} placeholder="E:\Fotos" />
           <button class="btn" type="button" onclick={pick}>Elegir…</button>
         </div>
+      </div>
+
+      <div class="field">
+        <label for="catalog-group">Grupo</label>
+        <select id="catalog-group" bind:value={groupId}>
+          <option value={0}>(sin grupo)</option>
+          {#each groups as g (g.id)}
+            <option value={g.id}>{g.name}</option>
+          {/each}
+        </select>
       </div>
 
       {#if err}

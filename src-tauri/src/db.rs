@@ -20,18 +20,74 @@ pub fn init_db(handle: &tauri::AppHandle) -> Result<Db, Box<dyn std::error::Erro
     conn.pragma_update(None, "temp_store", "MEMORY")?;
 
     conn.execute_batch(MIGRATIONS)?;
+    ensure_schema(&conn)?;
 
     Ok(Db(Arc::new(Mutex::new(conn))))
 }
 
+/// Cambios de esquema que `CREATE TABLE IF NOT EXISTS` no puede aplicar sobre
+/// bases de datos ya existentes (columnas nuevas). Es idempotente y converge
+/// al mismo esquema tanto en bases nuevas como antiguas.
+pub fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let mut cols: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(disks)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for c in rows {
+            cols.push(c?);
+        }
+    }
+    let has = |name: &str| cols.iter().any(|c| c == name);
+
+    // La FK usa ON DELETE SET NULL como red de seguridad; aun así el comando
+    // `delete_group` desagrupa explícitamente antes de borrar.
+    if !has("group_id") {
+        conn.execute(
+            "ALTER TABLE disks
+             ADD COLUMN group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL",
+            [],
+        )?;
+    }
+    if !has("position") {
+        conn.execute(
+            "ALTER TABLE disks ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        // Backfill único con el orden que la UI mostraba hasta ahora
+        // (alfabético), para que actualizar la app no reordene el panel.
+        conn.execute(
+            "UPDATE disks AS d SET position = (
+               SELECT COUNT(*) FROM disks d2
+               WHERE d2.name COLLATE NOCASE < d.name COLLATE NOCASE
+             )",
+            [],
+        )?;
+    }
+    // Debe ir después de los ALTER: en bases antiguas `group_id` no existe aún
+    // cuando se ejecuta MIGRATIONS.
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_disks_group ON disks(group_id, position);")?;
+    Ok(())
+}
+
 pub const MIGRATIONS: &str = "
+CREATE TABLE IF NOT EXISTS groups (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  color TEXT,
+  collapsed INTEGER NOT NULL DEFAULT 0,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS disks (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   root_path TEXT NOT NULL,
   total_size INTEGER NOT NULL DEFAULT 0,
   file_count INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL,
+  position INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
@@ -71,6 +127,82 @@ CREATE TABLE IF NOT EXISTS thumbs (
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    fn columna_existe(conn: &Connection, tabla: &str, nombre: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({tabla})"))
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        while let Some(r) = rows.next().unwrap() {
+            if r.get::<_, String>(1).unwrap() == nombre {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Réplica del esquema anterior a los grupos (sin `group_id` ni `position`).
+    const ESQUEMA_ANTIGUO: &str = "
+    CREATE TABLE disks (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      root_path TEXT NOT NULL,
+      total_size INTEGER NOT NULL DEFAULT 0,
+      file_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );";
+
+    #[test]
+    fn ensure_schema_es_idempotente_en_bd_nueva() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS).unwrap();
+        ensure_schema(&conn).unwrap();
+        // Repetirlo no debe fallar ni duplicar nada.
+        ensure_schema(&conn).unwrap();
+
+        assert!(columna_existe(&conn, "disks", "group_id"));
+        assert!(columna_existe(&conn, "disks", "position"));
+        assert!(columna_existe(&conn, "groups", "collapsed"));
+    }
+
+    #[test]
+    fn ensure_schema_migra_bd_antigua_conservando_el_orden() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(ESQUEMA_ANTIGUO).unwrap();
+        // Insertados en orden no alfabético a propósito.
+        for name in ["zeta", "alfa", "media"] {
+            conn.execute(
+                "INSERT INTO disks (name, root_path) VALUES (?1, 'C:/x')",
+                params![name],
+            )
+            .unwrap();
+        }
+
+        // `MIGRATIONS` no toca una tabla que ya existe; `ensure_schema` sí.
+        conn.execute_batch(MIGRATIONS).unwrap();
+        ensure_schema(&conn).unwrap();
+
+        assert!(columna_existe(&conn, "disks", "group_id"));
+        assert!(columna_existe(&conn, "disks", "position"));
+
+        // El backfill respeta el orden alfabético que mostraba la UI.
+        let mut stmt = conn
+            .prepare("SELECT name FROM disks ORDER BY position")
+            .unwrap();
+        let orden: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(orden, vec!["alfa", "media", "zeta"]);
+
+        // Volver a migrar no reordena ni pierde catálogos.
+        ensure_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM disks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
+    }
 
     #[test]
     fn migraciones_y_fts_funcionan() {

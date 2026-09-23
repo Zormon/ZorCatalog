@@ -3,14 +3,24 @@
   import Explorer from "./components/Explorer.svelte";
   import SearchView from "./components/SearchView.svelte";
   import NewCatalogDialog from "./components/NewCatalogDialog.svelte";
+  import NewGroupDialog from "./components/NewGroupDialog.svelte";
   import ImageModal from "./components/ImageModal.svelte";
   import { api } from "./lib/api";
-  import type { DiskMeta, Node, SearchHit } from "./lib/types";
+  import type {
+    CatalogGroup,
+    DiskMeta,
+    GroupPatch,
+    Node,
+    SearchHit,
+    SidebarLayoutEntry,
+  } from "./lib/types";
 
   let catalogs = $state<DiskMeta[]>([]);
+  let groups = $state<CatalogGroup[]>([]);
   let selectedDisk = $state<DiskMeta | null>(null);
   let view = $state<"browse" | "search">("browse");
   let showNewCatalog = $state(false);
+  let showNewGroup = $state(false);
   let ancestors = $state<Node[]>([]);
   let children = $state<Node[]>([]);
   let previewNode = $state<Node | null>(null);
@@ -18,15 +28,21 @@
   let error = $state("");
 
   $effect(() => {
-    void refreshCatalogs();
+    void refreshSidebar();
   });
 
-  async function refreshCatalogs() {
+  async function refreshSidebar() {
     try {
-      catalogs = await api.listCatalogs();
+      const [g, c] = await Promise.all([api.listGroups(), api.listCatalogs()]);
+      groups = g;
+      catalogs = c;
     } catch (e) {
       error = String(e);
     }
+  }
+
+  function clearError(e: unknown) {
+    error = String(e).replace(/^Error:\s*/, "");
   }
 
   async function selectDisk(d: DiskMeta | null) {
@@ -110,16 +126,88 @@
   function onCatalogCreated(meta: DiskMeta) {
     showNewCatalog = false;
     void selectDisk(meta);
-    void refreshCatalogs();
+    void refreshSidebar();
+  }
+
+  function onGroupCreated() {
+    showNewGroup = false;
+    void refreshSidebar();
   }
 
   async function removeCatalog(id: number) {
     try {
       await api.deleteCatalog(id);
       if (selectedDisk?.id === id) await selectDisk(null);
-      await refreshCatalogs();
+      await refreshSidebar();
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  async function removeGroup(id: number) {
+    try {
+      await api.deleteGroup(id);
+      await refreshSidebar();
+    } catch (e) {
+      clearError(e);
+    }
+  }
+
+  /** Colapso, color y renombrado comparten comando: se mandan los tres campos. */
+  async function updateGroup(id: number, patch: GroupPatch) {
+    const current = groups.find((g) => g.id === id);
+    if (!current) return;
+    const name = patch.name ?? current.name;
+    const color = patch.color !== undefined ? patch.color : current.color;
+    const collapsed = patch.collapsed ?? current.collapsed;
+    const before = groups;
+
+    // Optimista: colapsar y cambiar el color deben verse al instante.
+    groups = groups.map((g) => (g.id === id ? { ...g, name, color, collapsed } : g));
+    try {
+      const saved = await api.updateGroup(id, name, color, collapsed);
+      groups = groups.map((g) => (g.id === id ? saved : g));
+    } catch (e) {
+      groups = before;
+      clearError(e);
+    }
+  }
+
+  /**
+   * Recalcula el estado local a partir del layout que manda el sidebar, para
+   * que el arrastre se vea sin esperar al backend, y luego lo persiste.
+   */
+  async function changeLayout(entries: SidebarLayoutEntry[]) {
+    const before = { groups, catalogs };
+    const groupById = new Map(groups.map((g) => [g.id, g]));
+    const catalogById = new Map(catalogs.map((c) => [c.id, c]));
+    const nextGroups: CatalogGroup[] = [];
+    const nextCatalogs: DiskMeta[] = [];
+
+    let pos = 0;
+    for (const entry of entries) {
+      if (entry.kind === "group") {
+        const g = groupById.get(entry.id);
+        if (g) nextGroups.push({ ...g, position: pos });
+        entry.catalogs.forEach((cid, i) => {
+          const c = catalogById.get(cid);
+          if (c) nextCatalogs.push({ ...c, groupId: entry.id, position: i });
+        });
+      } else {
+        const c = catalogById.get(entry.id);
+        if (c) nextCatalogs.push({ ...c, groupId: null, position: pos });
+      }
+      pos += 1;
+    }
+
+    groups = nextGroups;
+    catalogs = nextCatalogs;
+    try {
+      await api.setSidebarLayout(entries);
+    } catch (e) {
+      groups = before.groups;
+      catalogs = before.catalogs;
+      clearError(e);
     }
   }
 </script>
@@ -127,10 +215,15 @@
 <div class="layout">
   <Sidebar
     {catalogs}
+    {groups}
     selected={selectedDisk}
     onSelect={(d) => void selectDisk(d)}
-    onNew={() => (showNewCatalog = true)}
-    onDelete={(id) => void removeCatalog(id)}
+    onNewCatalog={() => (showNewCatalog = true)}
+    onNewGroup={() => (showNewGroup = true)}
+    onDeleteCatalog={(id) => void removeCatalog(id)}
+    onDeleteGroup={(id) => void removeGroup(id)}
+    onUpdateGroup={(id, patch) => void updateGroup(id, patch)}
+    onLayoutChange={(entries) => void changeLayout(entries)}
   />
 
   <main class="content">
@@ -155,7 +248,11 @@
     </div>
 
     {#if view === "search"}
-      <SearchView {catalogs} onOpen={(h) => void openSearchResult(h)} />
+      <SearchView
+        {catalogs}
+        {groups}
+        onOpen={(h) => void openSearchResult(h)}
+      />
     {:else if selectedDisk}
       <Explorer
         disk={selectedDisk}
@@ -185,8 +282,16 @@
 
 {#if showNewCatalog}
   <NewCatalogDialog
+    {groups}
     onCreated={onCatalogCreated}
     onCancel={() => (showNewCatalog = false)}
+  />
+{/if}
+
+{#if showNewGroup}
+  <NewGroupDialog
+    onCreated={onGroupCreated}
+    onCancel={() => (showNewGroup = false)}
   />
 {/if}
 
