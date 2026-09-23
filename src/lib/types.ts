@@ -73,3 +73,52 @@ export interface SearchHit {
   node: Node;
   diskName: string;
 }
+
+/**
+ * Avance de una copia (evento `backup-progress`). La unidad de `done`/`total`
+ * depende de `stage`: en `db` y `merge` son catálogos; en `compress` y
+ * `decompress`, bytes.
+ */
+export interface BackupProgress {
+  phase: "export" | "import";
+  stage: "db" | "compress" | "decompress" | "merge";
+  done: number;
+  total: number;
+  current: string;
+}
+
+/** Lo que quedó dentro del fichero `.zcbak`. */
+export interface ExportSummary {
+  catalogs: number;
+  groups: number;
+  nodes: number;
+  thumbs: number;
+  /** Tamaño del payload SQLite sin comprimir. */
+  payloadBytes: number;
+  /** Tamaño del `.zcbak` ya comprimido. */
+  fileBytes: number;
+  /** Ruta final del fichero (con la extensión `.zcbak` ya asegurada). */
+  filePath: string;
+}
+
+/** Catálogo al que hubo que cambiar el nombre por chocar con uno existente. */
+export interface RenamedCatalog {
+  from: string;
+  to: string;
+}
+
+export interface ImportSummary {
+  catalogsImported: number;
+  /** Catálogos omitidos por ser duplicados exactos (mismo nombre y ruta). */
+  catalogsSkipped: string[];
+  catalogsRenamed: RenamedCatalog[];
+  groupsCreated: number;
+  /** Grupos que ya existían y se han reutilizado tal cual. */
+  groupsReused: number;
+  nodes: number;
+}
+
+/** Resultado de la última copia, para el diálogo de resumen. */
+export type BackupResult =
+  | { kind: "export"; data: ExportSummary }
+  | { kind: "import"; data: ImportSummary };

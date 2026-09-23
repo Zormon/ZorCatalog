@@ -2,10 +2,13 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use rusqlite::{Connection, OptionalExtension};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::db::Db;
-use crate::models::{DiskMeta, Group, Node, ScanProgress, SearchHit, SidebarEntry};
+use crate::models::{
+    BackupProgress, DiskMeta, ExportSummary, Group, ImportSummary, Node, ScanProgress, SearchHit,
+    SidebarEntry,
+};
 use crate::scanner::{self, ScanState};
 
 fn dberr(e: rusqlite::Error) -> String {
@@ -560,6 +563,102 @@ pub fn thumb_blob(conn: &Connection, node_id: i64) -> Result<Vec<u8>, String> {
     .map_err(dberr)?
     .map(|o| o.unwrap_or_default())
     .ok_or_else(|| "sin miniatura".to_string())
+}
+
+// --- Copias externas (.zcbak) --------------------------------------------
+
+/// Emite el avance de una copia por el evento `backup-progress`.
+struct EventReporter<'a> {
+    app: &'a AppHandle,
+    phase: &'static str,
+}
+
+impl crate::backup::Reporter for EventReporter<'_> {
+    fn report(&mut self, stage: crate::backup::Stage, done: i64, total: i64, current: &str) {
+        let _ = self.app.emit(
+            "backup-progress",
+            BackupProgress {
+                phase: self.phase.to_string(),
+                stage: stage.as_str().to_string(),
+                done,
+                total,
+                current: current.to_string(),
+            },
+        );
+    }
+}
+
+/// Carpeta de trabajo de las copias. Se usa la caché de la app y no el
+/// directorio temporal del sistema: en Linux `/tmp` suele ser tmpfs (RAM) y el
+/// payload de una copia puede ocupar cientos de MB.
+fn backup_tmp_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("No se pudo preparar la carpeta de trabajo: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("No se pudo preparar la carpeta de trabajo: {e}"))?;
+    Ok(dir)
+}
+
+/// Una copia hecha con un escaneo en curso guardaría un catálogo a medias.
+fn ensure_idle(scan: &ScanState) -> Result<(), String> {
+    if scan.active.load(Ordering::SeqCst) {
+        return Err("Hay un escaneo en curso; espera a que termine y vuelve a intentarlo".into());
+    }
+    Ok(())
+}
+
+/// Exporta todos los catálogos a un paquete `.zcbak` comprimido.
+#[tauri::command]
+pub async fn export_backup(
+    app: AppHandle,
+    db: State<'_, Db>,
+    scan: State<'_, ScanState>,
+    path: String,
+) -> Result<ExportSummary, String> {
+    ensure_idle(&scan)?;
+    let tmp_dir = backup_tmp_dir(&app)?;
+    let dest = PathBuf::from(&path);
+    let db2 = db.inner().clone();
+    let app2 = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db2.0.lock().map_err(|_| "bd bloqueada".to_string())?;
+        let mut rep = EventReporter {
+            app: &app2,
+            phase: "export",
+        };
+        crate::backup::export_backup(&mut conn, &dest, &tmp_dir, &mut rep)
+    })
+    .await
+    .map_err(|_| "la exportación terminó inesperadamente".to_string())?
+}
+
+/// Fusiona un paquete `.zcbak` en la base de datos actual (no borra nada).
+#[tauri::command]
+pub async fn import_backup(
+    app: AppHandle,
+    db: State<'_, Db>,
+    scan: State<'_, ScanState>,
+    path: String,
+) -> Result<ImportSummary, String> {
+    ensure_idle(&scan)?;
+    let tmp_dir = backup_tmp_dir(&app)?;
+    let src = PathBuf::from(&path);
+    let db2 = db.inner().clone();
+    let app2 = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db2.0.lock().map_err(|_| "bd bloqueada".to_string())?;
+        let mut rep = EventReporter {
+            app: &app2,
+            phase: "import",
+        };
+        crate::backup::import_backup(&mut conn, &src, &tmp_dir, &mut rep)
+    })
+    .await
+    .map_err(|_| "la importación terminó inesperadamente".to_string())?
 }
 
 #[cfg(test)]

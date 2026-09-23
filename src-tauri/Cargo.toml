@@ -16,6 +16,9 @@ walkdir = "2"
 rayon = "1"
 image = "0.25"
 chrono = "0.4"
+# Compresión del paquete de copia (.zcbak). Ya venía en el árbol de
+# dependencias de `image`, así que no añade compilación nueva.
+flate2 = "1"
 
 [profile.release]
 strip = true

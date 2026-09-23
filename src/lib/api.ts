@@ -3,6 +3,8 @@ import type {
   CatalogGroup,
   DiskMeta,
   DiskStats,
+  ExportSummary,
+  ImportSummary,
   Node,
   SearchHit,
   SidebarLayoutEntry,
@@ -57,6 +59,12 @@ export const api = {
   getStats: (diskId: number) => call<DiskStats>("get_stats", { diskId }),
   cancelScan: () => call<void>("cancel_scan"),
   isScanning: () => call<boolean>("is_scanning"),
+  /** Escribe un paquete `.zcbak` comprimido con todos los catálogos. */
+  exportBackup: (path: string) =>
+    call<ExportSummary>("export_backup", { path }),
+  /** Fusiona un paquete `.zcbak` en la base de datos actual (no borra nada). */
+  importBackup: (path: string) =>
+    call<ImportSummary>("import_backup", { path }),
 };
 
 /** Miniatura vía protocolo custom: sirve el BLOB sin pasar por JSON. */

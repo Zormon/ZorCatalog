@@ -1,12 +1,17 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
+  import { open as openFile, save as saveFile } from "@tauri-apps/plugin-dialog";
   import Sidebar from "./components/Sidebar.svelte";
   import Explorer from "./components/Explorer.svelte";
   import SearchView from "./components/SearchView.svelte";
   import NewCatalogDialog from "./components/NewCatalogDialog.svelte";
   import NewGroupDialog from "./components/NewGroupDialog.svelte";
   import ImageModal from "./components/ImageModal.svelte";
+  import BackupResultDialog from "./components/BackupResultDialog.svelte";
   import { api } from "./lib/api";
   import type {
+    BackupProgress,
+    BackupResult,
     CatalogGroup,
     DiskMeta,
     GroupPatch,
@@ -26,6 +31,10 @@
   let previewNode = $state<Node | null>(null);
   let loadingFolder = $state(false);
   let error = $state("");
+  /** Copia en curso: `null` cuando no hay ninguna. */
+  let backupBusy = $state<"export" | "import" | null>(null);
+  let backupProgress = $state<BackupProgress | null>(null);
+  let backupResult = $state<BackupResult | null>(null);
 
   $effect(() => {
     void refreshSidebar();
@@ -210,6 +219,78 @@
       clearError(e);
     }
   }
+
+  // --- Copias externas (.zcbak) ------------------------------------------
+
+  /** Texto del progreso, según la etapa que esté en curso. */
+  function backupStatus(p: BackupProgress | null, busy: "export" | "import" | null) {
+    if (!busy) return "";
+    if (!p) {
+      return busy === "export" ? "Preparando la copia…" : "Preparando la importación…";
+    }
+    const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+    if (p.stage === "db") return `Reuniendo catálogos… ${p.done}/${p.total}`;
+    if (p.stage === "compress") return `Comprimiendo… ${pct} %`;
+    if (p.stage === "decompress") return `Descomprimiendo… ${pct} %`;
+    return `Importando ${p.done}/${p.total}${p.current ? `: ${p.current}` : ""}`;
+  }
+
+  /** Escucha el progreso de una copia y devuelve la función para dejar de escuchar. */
+  async function trackBackup(phase: "export" | "import") {
+    return listen<BackupProgress>("backup-progress", (ev) => {
+      if (ev.payload.phase === phase) backupProgress = ev.payload;
+    });
+  }
+
+  async function doExport() {
+    error = "";
+    const hoy = new Date().toISOString().slice(0, 10);
+    const path = await saveFile({
+      title: "Exportar copia de ZorCatalog",
+      defaultPath: `zorcatalog-${hoy}.zcbak`,
+      filters: [{ name: "Copia de ZorCatalog", extensions: ["zcbak"] }],
+    });
+    if (!path) return; // cancelado
+
+    backupBusy = "export";
+    backupProgress = null;
+    const un = await trackBackup("export");
+    try {
+      const data = await api.exportBackup(path);
+      backupResult = { kind: "export", data };
+    } catch (e) {
+      clearError(e);
+    } finally {
+      un();
+      backupBusy = null;
+      backupProgress = null;
+    }
+  }
+
+  async function doImport() {
+    error = "";
+    const sel = await openFile({
+      title: "Importar copia de ZorCatalog",
+      multiple: false,
+      filters: [{ name: "Copia de ZorCatalog", extensions: ["zcbak"] }],
+    });
+    if (typeof sel !== "string") return; // cancelado
+
+    backupBusy = "import";
+    backupProgress = null;
+    const un = await trackBackup("import");
+    try {
+      const data = await api.importBackup(sel);
+      await refreshSidebar();
+      backupResult = { kind: "import", data };
+    } catch (e) {
+      clearError(e);
+    } finally {
+      un();
+      backupBusy = null;
+      backupProgress = null;
+    }
+  }
 </script>
 
 <div class="layout">
@@ -245,6 +326,28 @@
       {#if error}
         <span class="err">{error}</span>
       {/if}
+      <span class="spacer"></span>
+      {#if backupBusy}
+        <span class="backup-status">{backupStatus(backupProgress, backupBusy)}</span>
+      {/if}
+      <button
+        class="btn"
+        type="button"
+        disabled={backupBusy !== null}
+        title="Guardar una copia externa de todos los catálogos"
+        onclick={() => void doExport()}
+      >
+        Exportar
+      </button>
+      <button
+        class="btn"
+        type="button"
+        disabled={backupBusy !== null}
+        title="Añadir los catálogos de una copia externa"
+        onclick={() => void doImport()}
+      >
+        Importar
+      </button>
     </div>
 
     {#if view === "search"}
@@ -297,4 +400,8 @@
 
 {#if previewNode}
   <ImageModal node={previewNode} onClose={() => (previewNode = null)} />
+{/if}
+
+{#if backupResult}
+  <BackupResultDialog result={backupResult} onClose={() => (backupResult = null)} />
 {/if}

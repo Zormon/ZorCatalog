@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backup;
 mod commands;
 mod db;
 mod models;
@@ -57,6 +58,8 @@ fn main() {
             commands::get_ancestors,
             commands::search,
             commands::get_stats,
+            commands::export_backup,
+            commands::import_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error mientras se ejecutaba ZorCatalog");

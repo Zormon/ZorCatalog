@@ -68,6 +68,16 @@ select:focus {
   background: var(--bg-panel);
 }
 
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn:disabled:hover {
+  border-color: var(--border);
+  background: var(--bg-elev);
+}
+
 .btn.primary {
   background: var(--accent-strong);
   border-color: transparent;
@@ -399,6 +409,17 @@ select:focus {
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   flex-shrink: 0;
+}
+
+/* Empuja las acciones de copia al extremo derecho de la barra superior. */
+.topbar .spacer {
+  flex: 1;
+}
+
+.backup-status {
+  color: var(--text-dim);
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .crumbs {
